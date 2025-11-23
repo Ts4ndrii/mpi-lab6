@@ -5,17 +5,20 @@
 #include <algorithm>
 #include <iomanip>
 
-// Допоміжна функція для індексації
-inline int idx(int row, int col, int N) {
-    return row * N + col;
+// --- ДОПОМІЖНІ ФУНКЦІЇ ---
+
+inline int idx(int row, int col, int num_cols) {
+    return row * num_cols + col;
 }
 
-// Транспонування (A -> A^T) для зручної відправки стовпців
-std::vector<double> transpose(const std::vector<double>& matrix, int N) {
-    std::vector<double> result(N * N);
-    for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < N; ++j) {
-            result[idx(j, i, N)] = matrix[idx(i, j, N)];
+// Транспонування: (ROWS x COLS) -> (COLS x ROWS)
+// Це потрібно, щоб стовпці стали рядками в пам'яті для зручної розсилки MPI
+std::vector<double> transpose(const std::vector<double>& matrix, int rows, int cols) {
+    std::vector<double> result(rows * cols);
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            // result[col][row] = matrix[row][col]
+            result[j * rows + i] = matrix[i * cols + j];
         }
     }
     return result;
@@ -28,95 +31,115 @@ int main(int argc, char** argv) {
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
 
-    // Зчитуємо N з аргументів (за замовчуванням 130)
-    int N = 130; 
-    if (argc > 1) N = atoi(argv[1]);
+    // === 1. ПАРАМЕТРИ ЗАДАЧІ (580 рядків, 130 стовпців) ===
+    int ROWS = 580; 
+    int COLS = 130; 
 
-    if (world_rank == 0) {
-        std::cout << "Starting Lab 6. Variant 23.\n";
-        std::cout << "Processes: " << world_size << ", Matrix N: " << N << "\n";
+    // Можливість змінити через аргументи: ./lab6 <rows> <cols>
+    if (argc > 2) {
+        ROWS = atoi(argv[1]);
+        COLS = atoi(argv[2]);
     }
 
-    // === РОЗРАХУНОК РОЗПОДІЛУ НАВАНТАЖЕННЯ (Load Balancing) ===
-    // Визначаємо, скільки стовпців дістанеться кожному процесору
-    std::vector<int> send_counts(world_size); // Кількість стовпців для кожного рангу
-    std::vector<int> displs(world_size);      // Зміщення (індекс початку)
-    
-    int base_cols = N / world_size;
-    int remainder = N % world_size;
+    if (world_rank == 0) {
+        std::cout << "Starting Lab 6 (580x130).\n";
+        std::cout << "Processes: " << world_size << "\n";
+        std::cout << "Matrix: " << ROWS << " rows x " << COLS << " cols.\n";
+    }
+
+    // === 2. РОЗПОДІЛ СТОВПЦІВ (Load Balancing) ===
+    // Ділимо 130 стовпців на world_size (13)
+    std::vector<int> send_counts(world_size);
+    std::vector<int> displs(world_size);
+
+    int base_cols = COLS / world_size; // 130 / 13 = 10
+    int remainder = COLS % world_size; // 0
     int current_disp = 0;
 
     for (int i = 0; i < world_size; i++) {
-        // Якщо є залишок, перші процеси отримують на 1 стовпець більше
         send_counts[i] = base_cols + (i < remainder ? 1 : 0);
         displs[i] = current_disp;
         current_disp += send_counts[i];
     }
 
-    // Локальна кількість стовпців для поточного процесу
-    int local_cols = send_counts[world_rank];
+    int local_cols = send_counts[world_rank]; // Для 13 проц. це буде 10
 
-    // === ПІДГОТОВКА БУФЕРІВ ===
-    // Повні матриці (тільки на Rank 0)
-    std::vector<double> A, A1, A2, B2, C2; 
-    std::vector<double> b, b1, c1;         
+    // === 3. ВИДІЛЕННЯ ПАМ'ЯТІ ===
     
+    // Глобальні дані (тільки на Rank 0)
+    std::vector<double> A, A1, B2, C2; 
+    std::vector<double> b, b1, c1;     
+    std::vector<double> full_A2; 
+
     // Локальні буфери
-    // local_cols стовпців, кожен висотою N. Зберігаємо транспоновано (як рядки).
-    std::vector<double> local_A_T(local_cols * N); 
-    std::vector<double> local_A1_T(local_cols * N);
-    std::vector<double> local_B2_T(local_cols * N);
-    std::vector<double> local_C2_T(local_cols * N);
-    
-    std::vector<double> full_A2(N * N); // A2 потрібна всім повністю
-    
+    // Ми зберігаємо стовпці транспоновано, тобто як рядки довжиною ROWS (580)
+    std::vector<double> local_A_T(local_cols * ROWS);
+    std::vector<double> local_A1_T(local_cols * ROWS);
+    std::vector<double> local_B2_T(local_cols * ROWS);
+    std::vector<double> local_C2_T(local_cols * ROWS);
+
+    // Вектори b, b1, c1 мають розмір COLS (130), ми отримуємо шматок довжиною local_cols
     std::vector<double> local_b(local_cols);
     std::vector<double> local_b1(local_cols);
     std::vector<double> local_c1(local_cols);
 
-    // === 1. ГЕНЕРАЦІЯ (Rank 0) ===
+    // === 4. ГЕНЕРАЦІЯ (Rank 0) ===
     if (world_rank == 0) {
-        A.resize(N * N); A1.resize(N * N); A2.resize(N * N);
-        B2.resize(N * N); C2.resize(N * N);
-        b.resize(N); b1.resize(N); c1.resize(N);
+        A.resize(ROWS * COLS); A1.resize(ROWS * COLS);
+        B2.resize(ROWS * COLS); C2.resize(ROWS * COLS);
+        full_A2.resize(ROWS * COLS);
 
-        for (int i = 0; i < N; ++i) {
-            b[i] = ((i + 1) % 2 == 0) ? (24.0 / ((i + 1) * (i + 1) + 4)) : 24.0;
-            b1[i] = 1.0; c1[i] = 1.0; 
-            for (int j = 0; j < N; ++j) {
-                A[idx(i, j, N)] = 1.0; A1[idx(i, j, N)] = 1.0;
-                A2[idx(i, j, N)] = 1.0; B2[idx(i, j, N)] = 1.0;
-                C2[idx(i, j, N)] = 24.0 / (i + 1 + 3 * (j + 1) * (j + 1));
+        b.resize(COLS); b1.resize(COLS); c1.resize(COLS);
+
+        // Заповнення даними
+        for (int j = 0; j < COLS; ++j) {
+            // Вектори
+            b[j] = ((j + 1) % 2 == 0) ? (24.0 / ((j + 1) * (j + 1) + 4)) : 24.0;
+            b1[j] = 1.0; c1[j] = 1.0;
+
+            for (int i = 0; i < ROWS; ++i) {
+                // Матриці [i][j]
+                A[idx(i, j, COLS)] = 1.0;
+                A1[idx(i, j, COLS)] = 1.0;
+                B2[idx(i, j, COLS)] = 1.0;
+                full_A2[idx(i, j, COLS)] = 1.0; 
+                // Cij
+                C2[idx(i, j, COLS)] = 24.0 / (i + 1 + 3.0 * (j + 1) * (j + 1));
             }
         }
-        full_A2 = A2; 
-        
-        // Транспонуємо для розсилки стовпців
-        A = transpose(A, N); A1 = transpose(A1, N);
-        B2 = transpose(B2, N); C2 = transpose(C2, N);
+
+        // ТРАНСПОНУВАННЯ (580x130 -> 130x580)
+        // Тепер у пам'яті лежать "рядки" довжиною 580, які насправді є стовпцями
+        A = transpose(A, ROWS, COLS);
+        A1 = transpose(A1, ROWS, COLS);
+        B2 = transpose(B2, ROWS, COLS);
+        C2 = transpose(C2, ROWS, COLS);
+    } else {
+        full_A2.resize(ROWS * COLS);
     }
 
     double start_time = MPI_Wtime();
 
-    // === 2. РОЗСИЛКА (SCATTERV) ===
-    // Для Scatterv нам потрібні масиви кількості елементів (а не стовпців)
+    // === 5. РОЗСИЛКА (SCATTERV) ===
+    
+    // Підготовка масивів для Scatterv (в одиницях double)
     std::vector<int> sc_counts(world_size), sc_displs(world_size);
     for(int i=0; i<world_size; ++i) {
-        sc_counts[i] = send_counts[i] * N; // Кількість double
-        sc_displs[i] = displs[i] * N;      // Зміщення в double
+        sc_counts[i] = send_counts[i] * ROWS; // Кількість елементів: 10 * 580 = 5800
+        sc_displs[i] = displs[i] * ROWS;
     }
 
-    // Розсилаємо матриці
+    // Розсилка стовпців (як рядків транспонованої матриці)
     MPI_Scatterv(A.data(), sc_counts.data(), sc_displs.data(), MPI_DOUBLE, 
-                 local_A_T.data(), local_cols * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+                 local_A_T.data(), local_cols * ROWS, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Scatterv(A1.data(), sc_counts.data(), sc_displs.data(), MPI_DOUBLE, 
-                 local_A1_T.data(), local_cols * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+                 local_A1_T.data(), local_cols * ROWS, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Scatterv(B2.data(), sc_counts.data(), sc_displs.data(), MPI_DOUBLE, 
-                 local_B2_T.data(), local_cols * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+                 local_B2_T.data(), local_cols * ROWS, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Scatterv(C2.data(), sc_counts.data(), sc_displs.data(), MPI_DOUBLE, 
-                 local_C2_T.data(), local_cols * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+                 local_C2_T.data(), local_cols * ROWS, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    // Розсилаємо вектори (тут використовуємо send_counts, бо вектори 1D)
+    // Розсилка векторів (вони мають розмір COLS=130, ділимо просто на шматки по 10)
     MPI_Scatterv(b.data(), send_counts.data(), displs.data(), MPI_DOUBLE, 
                  local_b.data(), local_cols, MPI_DOUBLE, 0, MPI_COMM_WORLD);
     MPI_Scatterv(b1.data(), send_counts.data(), displs.data(), MPI_DOUBLE, 
@@ -124,69 +147,79 @@ int main(int argc, char** argv) {
     MPI_Scatterv(c1.data(), send_counts.data(), displs.data(), MPI_DOUBLE, 
                  local_c1.data(), local_cols, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    // A2 всім
-    MPI_Bcast(full_A2.data(), N * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    // Broadcast A2
+    MPI_Bcast(full_A2.data(), ROWS * COLS, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    // === 3. ОБЧИСЛЕННЯ ===
+    // === 6. ОБЧИСЛЕННЯ ===
+
+    // --- 6.1 y1 = A * b ---
+    // A [580 x 130], b [130]. y1 [580].
+    // Кожен процес має 10 стовпців A (кожен висотою 580) і 10 елементів b.
+    // Він рахує часткову суму вектора y1 (розміром 580).
+    std::vector<double> local_y1(ROWS, 0.0);
     
-    // y1 = A * b
-    std::vector<double> local_y1_sum(N, 0.0);
     for (int k = 0; k < local_cols; ++k) {
-        double val = local_b[k];
-        for (int i = 0; i < N; ++i) local_y1_sum[i] += local_A_T[idx(k, i, N)] * val;
-    }
-    std::vector<double> y1(N);
-    MPI_Allreduce(local_y1_sum.data(), y1.data(), N, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-    // y2 = A1 * (b1 - 24*c1)
-    std::vector<double> local_y2_sum(N, 0.0);
-    for (int k = 0; k < local_cols; ++k) {
-        double factor = local_b1[k] - (local_c1[k] * 24.0);
-        for (int i = 0; i < N; ++i) local_y2_sum[i] += local_A1_T[idx(k, i, N)] * factor;
-    }
-    std::vector<double> y2(N);
-    MPI_Allreduce(local_y2_sum.data(), y2.data(), N, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
-
-    // Y3 = A2 * (B2 + 24*C2)
-    std::vector<double> local_Y3_cols_T(local_cols * N);
-    std::vector<double> temp_col(N);
-
-    for (int k = 0; k < local_cols; ++k) {
-        // Формуємо стовпець (B2 + 24*C2)
-        for(int r = 0; r < N; ++r) {
-            temp_col[r] = local_B2_T[idx(k, r, N)] + 24.0 * local_C2_T[idx(k, r, N)];
-        }
-        // Множимо A2 на цей стовпець
-        for (int i = 0; i < N; ++i) {
-            double dot = 0.0;
-            for (int j = 0; j < N; ++j) dot += full_A2[idx(i, j, N)] * temp_col[j];
-            local_Y3_cols_T[idx(k, i, N)] = dot;
+        double val_b = local_b[k];
+        for (int r = 0; r < ROWS; ++r) {
+            // local_A_T[k][r] -- це A[r][global_col]
+            local_y1[r] += local_A_T[idx(k, r, ROWS)] * val_b;
         }
     }
+    // Сумуємо всі вектори розміром 580
+    std::vector<double> y1(ROWS);
+    MPI_Allreduce(local_y1.data(), y1.data(), ROWS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
-    // === 4. ЗБІР РЕЗУЛЬТАТІВ (GATHERV) ===
+    // --- 6.2 y2 = A1 * (b1 - 24*c1) ---
+    std::vector<double> local_y2(ROWS, 0.0);
+    for (int k = 0; k < local_cols; ++k) {
+        double val_vec = local_b1[k] - (24.0 * local_c1[k]);
+        for (int r = 0; r < ROWS; ++r) {
+            local_y2[r] += local_A1_T[idx(k, r, ROWS)] * val_vec;
+        }
+    }
+    std::vector<double> y2(ROWS);
+    MPI_Allreduce(local_y2.data(), y2.data(), ROWS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+    // --- 6.3 Y3 (поелементно для прикладу) ---
+    // Y3 = A2 * (B2 + 24*C2) -> Поелементно, бо множення матриць тут неможливе (розмірності)
+    std::vector<double> local_Y3_T(local_cols * ROWS);
+
+    for (int k = 0; k < local_cols; ++k) {
+        for (int r = 0; r < ROWS; ++r) {
+            double val_B = local_B2_T[idx(k, r, ROWS)];
+            double val_C = local_C2_T[idx(k, r, ROWS)];
+            
+            // Глобальний індекс стовпця
+            int global_col = displs[world_rank] + k;
+            double val_A = full_A2[idx(r, global_col, COLS)];
+
+            local_Y3_T[idx(k, r, ROWS)] = val_A * (val_B + 24.0 * val_C);
+        }
+    }
+
+    // === 7. ЗБІР РЕЗУЛЬТАТІВ (GATHERV) ===
     std::vector<double> Y3_T;
-    if (world_rank == 0) Y3_T.resize(N * N);
+    if (world_rank == 0) Y3_T.resize(ROWS * COLS);
 
-    MPI_Gatherv(local_Y3_cols_T.data(), local_cols * N, MPI_DOUBLE,
+    // Збираємо транспоновані шматки (по 5800 елементів)
+    MPI_Gatherv(local_Y3_T.data(), local_cols * ROWS, MPI_DOUBLE,
                 Y3_T.data(), sc_counts.data(), sc_displs.data(), MPI_DOUBLE,
                 0, MPI_COMM_WORLD);
 
-    // === 5. ФІНАЛ ===
+    // === 8. ФІНАЛ (Rank 0) ===
     if (world_rank == 0) {
-        // Транспонуємо Y3 назад
-        std::vector<double> Y3 = transpose(Y3_T, N);
+        // Транспонуємо Y3 назад у вигляд 580x130
+        std::vector<double> Y3 = transpose(Y3_T, COLS, ROWS);
         
-        // Фінальні скалярні обрахунки
+        // Скалярний добуток y1 * y2 (розмір 580)
         double y1_dot_y2 = 0.0;
-        for(int i=0; i<N; ++i) y1_dot_y2 += y1[i] * y2[i];
+        for(int i=0; i<ROWS; ++i) y1_dot_y2 += y1[i] * y2[i];
 
-        // Сума Y3 (для прикладу)
         double Y3_sum = 0.0;
         for(auto v : Y3) Y3_sum += v;
 
         double end_time = MPI_Wtime();
-        
+
         std::cout << "Done. Time: " << (end_time - start_time) * 1000.0 << " ms.\n";
         std::cout << "Debug Info: y1*y2=" << y1_dot_y2 << ", Sum(Y3)=" << Y3_sum << std::endl;
     }
