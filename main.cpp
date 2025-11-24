@@ -1,9 +1,3 @@
-/*
- * Лабораторна робота №6. Варіант 23.
- * Матриця: 580 рядків (ROWS) x 130 стовпців (COLS).
- * Додано: Автоматичний розрахунок складності та пам'яті.
- */
-
 #include <mpi.h>
 #include <vector>
 #include <iostream>
@@ -45,7 +39,7 @@ int main(int argc, char** argv) {
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
 
-    // 1. ПАРАМЕТРИ
+    // 1. Parameters
     int ROWS = 580; 
     int COLS = 130; 
 
@@ -56,13 +50,12 @@ int main(int argc, char** argv) {
 
     if (world_rank == 0) {
         std::cout << "============================================" << std::endl;
-        std::cout << " ЗАПУСК ЛАБОРАТОРНОЇ РОБОТИ №6 (ВАРІАНТ 23)" << std::endl;
-        std::cout << " Розмірність: " << ROWS << " рядків x " << COLS << " стовпців" << std::endl;
-        std::cout << " Кількість процесів: " << world_size << std::endl;
+        std::cout << " Size: " << ROWS << " rows x " << COLS << " columns" << std::endl;
+        std::cout << " Number of processes: " << world_size << std::endl;
         std::cout << "============================================" << std::endl;
     }
 
-    // 2. РОЗПОДІЛ НАВАНТАЖЕННЯ
+    // 2. Data distribution
     std::vector<int> send_counts(world_size);
     std::vector<int> displs(world_size);
 
@@ -78,44 +71,35 @@ int main(int argc, char** argv) {
 
     int local_cols = send_counts[world_rank];
 
-    // === ЕТАП 0: РОЗРАХУНОК ТА ВИВІД СТАТИСТИКИ (НОВЕ) ===
     MPI_Barrier(MPI_COMM_WORLD);
     if (world_rank == 0) {
-        std::cout << "\n--- СТАТИСТИКА НАВАНТАЖЕННЯ (для звіту) ---" << std::endl;
+        std::cout << "\n--- LOAD STATISTICS ---" << std::endl;
     }
     MPI_Barrier(MPI_COMM_WORLD);
 
-    // Розрахунок пам'яті (Тільки розподілені дані, без врахування дубльованої A2)
-    // 4 матриці (A, A1, B2, C2) * local_cols * ROWS
-    // 3 вектори (b, b1, c1) * local_cols
     long long elements_matrix = 4LL * local_cols * ROWS;
     long long elements_vector = 3LL * local_cols;
     long long total_elements = elements_matrix + elements_vector;
     double memory_kb = (total_elements * sizeof(double)) / 1024.0;
 
-    // Розрахунок операцій (FLOPs estimate)
-    // y1 = A*b:  ROWS * local_cols * 2 (mult + add)
-    // y2 = ...:  ROWS * local_cols * 2 + local_cols*2 (vector prep)
-    // Y3 = ...:  ROWS * local_cols * 3 (add, mult, mult)
     long long flops_y1 = (long long)ROWS * local_cols * 2;
     long long flops_y2 = (long long)ROWS * local_cols * 2;
     long long flops_Y3 = (long long)ROWS * local_cols * 3;
     long long total_flops = flops_y1 + flops_y2 + flops_Y3;
 
-    // Виводимо статистику для кожного процесора (синхронізовано)
+    // Output load statistics
     for (int i = 0; i < world_size; i++) {
         MPI_Barrier(MPI_COMM_WORLD);
         if (i == world_rank) {
             std::cout << "[Rank " << std::setw(2) << world_rank << "] "
-                      << "Стовпців: " << std::setw(3) << local_cols << " | "
-                      << "Пам'ять: " << std::fixed << std::setprecision(2) << memory_kb << " KB | "
-                      << "Операцій: " << total_flops << " FLOPs" << std::endl;
+                      << "Columns: " << std::setw(3) << local_cols << " | "
+                      << "Memory: " << std::fixed << std::setprecision(2) << memory_kb << " KB | "
+                      << "Operations: " << total_flops << " FLOPs" << std::endl;
         }
     }
     MPI_Barrier(MPI_COMM_WORLD);
 
-    // === ЕТАП 2: ВИДІЛЕННЯ ПАМ'ЯТІ ===
-    log_stage(world_rank, "Етап 2: Виділення пам'яті");
+    log_stage(world_rank, "Stage 2: Getting memory");
 
     std::vector<double> A, A1, B2, C2, full_A2; 
     std::vector<double> b, b1, c1;     
@@ -129,8 +113,7 @@ int main(int argc, char** argv) {
     std::vector<double> local_b1(local_cols);
     std::vector<double> local_c1(local_cols);
 
-    // === ЕТАП 3: ГЕНЕРАЦІЯ ===
-    log_stage(world_rank, "Етап 3: Генерація даних");
+    log_stage(world_rank, "Stage 3: Data generating");
 
     if (world_rank == 0) {
         A.resize(ROWS * COLS); A1.resize(ROWS * COLS);
@@ -159,8 +142,7 @@ int main(int argc, char** argv) {
 
     double start_time = MPI_Wtime();
 
-    // === ЕТАП 4: РОЗСИЛКА ===
-    log_stage(world_rank, "Етап 4: Scatter & Bcast");
+    log_stage(world_rank, "Stage 4: Scatter & Bcast");
     
     std::vector<int> sc_counts(world_size), sc_displs(world_size);
     for(int i=0; i<world_size; ++i) {
@@ -179,8 +161,7 @@ int main(int argc, char** argv) {
 
     MPI_Bcast(full_A2.data(), ROWS * COLS, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    // === ЕТАП 5: ОБЧИСЛЕННЯ ===
-    log_stage(world_rank, "Етап 5: Обчислення");
+    log_stage(world_rank, "Stage 5: Calculations");
 
     // y1
     std::vector<double> local_y1(ROWS, 0.0);
@@ -212,19 +193,17 @@ int main(int argc, char** argv) {
         }
     }
 
-    // === ЕТАП 6: ЗБІР ===
-    log_stage(world_rank, "Етап 6: Gather");
+    log_stage(world_rank, "Stage 6: Gather");
     std::vector<double> Y3_T;
     if (world_rank == 0) Y3_T.resize(ROWS * COLS);
     MPI_Gatherv(local_Y3_T.data(), local_cols * ROWS, MPI_DOUBLE, Y3_T.data(), sc_counts.data(), sc_displs.data(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    // === ЕТАП 7: ФІНАЛ ===
-    log_stage(world_rank, "Етап 7: Фінальна формула");
+    log_stage(world_rank, "Stage 7: Final expression");
 
     if (world_rank == 0) {
         std::vector<double> Y3 = transpose(Y3_T, COLS, ROWS);
         
-        double D = 0.0; // y1 * y2
+        double D = 0.0;
         for(int i=0; i<ROWS; ++i) D += y1[i] * y2[i];
 
         double term1_sum = 0.0, term2_sum = 0.0, term3_sum = 0.0;
@@ -234,16 +213,14 @@ int main(int argc, char** argv) {
             term3_sum += val * val * val;
         }
 
-        // X = Y3 + (y1*y2)*Y3^2 + ...
         double FinalResult = term1_sum + (D * term2_sum) + (D * term3_sum) + (D * term1_sum * term1_sum);
 
         double end_time = MPI_Wtime();
 
         std::cout << "\n============================================" << std::endl;
-        std::cout << " РЕЗУЛЬТАТИ" << std::endl;
-        std::cout << " Час: " << (end_time - start_time) * 1000.0 << " ms" << std::endl;
-        std::cout << " y1*y2: " << D << std::endl;
-        std::cout << " Фінальний результат (X): " << std::scientific << FinalResult << std::endl;
+        std::cout << " RESULTS" << std::endl;
+        std::cout << " Time: " << (end_time - start_time) * 1000.0 << " ms" << std::endl;
+        std::cout << " Final result (X): " << std::scientific << FinalResult << std::endl;
         std::cout << "============================================" << std::endl;
     }
 
