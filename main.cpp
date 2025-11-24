@@ -6,6 +6,8 @@
 #include <iomanip>
 #include <string>
 
+// --- HELPER FUNCTIONS ---
+
 inline int idx(int row, int col, int num_cols) {
     return row * num_cols + col;
 }
@@ -35,6 +37,7 @@ int main(int argc, char** argv) {
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
     MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
 
+    // 1. PARAMETERS
     int ROWS = 580; 
     int COLS = 130; 
 
@@ -44,12 +47,17 @@ int main(int argc, char** argv) {
     }
 
     if (world_rank == 0) {
-        std::cout << " Size: " << ROWS << "x" << COLS << std::endl;
-        std::cout << " Processes: " << world_size << std::endl;
+        std::cout << "============================================" << std::endl;
+        std::cout << " STARTING LAB WORK #6 (VARIANT 24)" << std::endl;
+        std::cout << " Dimensions: " << ROWS << " rows x " << COLS << " cols" << std::endl;
+        std::cout << " Process count: " << world_size << std::endl;
+        std::cout << "============================================" << std::endl;
     }
 
+    // 2. LOAD BALANCING
     std::vector<int> send_counts(world_size);
     std::vector<int> displs(world_size);
+
     int base_cols = COLS / world_size;
     int remainder = COLS % world_size;
     int current_disp = 0;
@@ -59,10 +67,42 @@ int main(int argc, char** argv) {
         displs[i] = current_disp;
         current_disp += send_counts[i];
     }
+
     int local_cols = send_counts[world_rank];
 
-    log_stage(world_rank, "Memory allocation");
-    
+    // === STAGE 0: STATISTICS (MEMORY & OPS) ===
+    MPI_Barrier(MPI_COMM_WORLD);
+    if (world_rank == 0) {
+        std::cout << "\n--- LOAD STATISTICS (for report) ---" << std::endl;
+        std::cout << " Rank | Cols | Memory (KB) | Ops (FLOPs)" << std::endl;
+        std::cout << "-----------------------------------------" << std::endl;
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    long long elements_matrix = 4LL * local_cols * ROWS;
+    long long elements_vector = 3LL * local_cols;
+    long long total_elements = elements_matrix + elements_vector;
+    double memory_kb = (total_elements * sizeof(double)) / 1024.0;
+
+    long long flops_y1 = (long long)ROWS * local_cols * 2;
+    long long flops_y2 = (long long)ROWS * local_cols * 2;
+    long long flops_Y3 = (long long)ROWS * local_cols * 3;
+    long long total_flops = flops_y1 + flops_y2 + flops_Y3;
+
+    for (int i = 0; i < world_size; i++) {
+        MPI_Barrier(MPI_COMM_WORLD);
+        if (i == world_rank) {
+            std::cout << " " << std::setw(4) << world_rank << " | "
+                      << std::setw(4) << local_cols << " | "
+                      << std::setw(11) << std::fixed << std::setprecision(2) << memory_kb << " | "
+                      << std::setw(10) << total_flops << std::endl;
+        }
+    }
+    MPI_Barrier(MPI_COMM_WORLD);
+
+    // === STAGE 2: MEMORY ALLOCATION ===
+    log_stage(world_rank, "Stage 2: Memory allocation");
+
     std::vector<double> A, A1, B2, C2, full_A2; 
     std::vector<double> b, b1, c1;     
 
@@ -70,12 +110,14 @@ int main(int argc, char** argv) {
     std::vector<double> local_A1_T(local_cols * ROWS);
     std::vector<double> local_B2_T(local_cols * ROWS);
     std::vector<double> local_C2_T(local_cols * ROWS);
-    
+
     std::vector<double> local_b(local_cols);
     std::vector<double> local_b1(local_cols);
     std::vector<double> local_c1(local_cols);
 
-    log_stage(world_rank, "Data generation (Rank 0)");
+    // === STAGE 3: DATA GENERATION ===
+    log_stage(world_rank, "Stage 3: Data generation");
+
     if (world_rank == 0) {
         A.resize(ROWS * COLS); A1.resize(ROWS * COLS);
         B2.resize(ROWS * COLS); C2.resize(ROWS * COLS);
@@ -83,16 +125,16 @@ int main(int argc, char** argv) {
         b.resize(COLS); b1.resize(COLS); c1.resize(COLS);
 
         for (int j = 0; j < COLS; ++j) {
-            int i_idx = j + 1;
-            b[j] = (i_idx % 2 == 0) ? (24.0 / (i_idx*i_idx + 4.0)) : 24.0;
-            b1[j] = 1.0; 
-            c1[j] = 1.0;
-
+            int i_math = j + 1;
+            if (i_math % 2 == 0) b[j] = 24.0 / (i_math * i_math + 4.0);
+            else b[j] = 24.0;
+            
+            b1[j] = 1.0; c1[j] = 1.0;
             for (int i = 0; i < ROWS; ++i) {
-                A[idx(i, j, COLS)] = 1.0; 
-                A1[idx(i, j, COLS)] = 1.0; 
-                B2[idx(i, j, COLS)] = 1.0; 
-                full_A2[idx(i, j, COLS)] = 1.0;
+                A[idx(i, j, COLS)] = 1.0;
+                A1[idx(i, j, COLS)] = 1.0;
+                B2[idx(i, j, COLS)] = 1.0;
+                full_A2[idx(i, j, COLS)] = 1.0; 
                 C2[idx(i, j, COLS)] = 24.0 / ((i + 1) + 3.0 * (j + 1) * (j + 1));
             }
         }
@@ -106,7 +148,9 @@ int main(int argc, char** argv) {
 
     double start_time = MPI_Wtime();
 
-    log_stage(world_rank, "Data sending (Scatter)");
+    // === STAGE 4: SCATTER ===
+    log_stage(world_rank, "Stage 4: Scatter & Bcast");
+    
     std::vector<int> sc_counts(world_size), sc_displs(world_size);
     for(int i=0; i<world_size; ++i) {
         sc_counts[i] = send_counts[i] * ROWS;
@@ -124,27 +168,28 @@ int main(int argc, char** argv) {
 
     MPI_Bcast(full_A2.data(), ROWS * COLS, MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    log_stage(world_rank, "Parallel computations of y1, y2, Y3");
+    // === STAGE 5: COMPUTATION ===
+    log_stage(world_rank, "Stage 5: Computation");
 
-    // y1 = A * b
+    // y1
     std::vector<double> local_y1(ROWS, 0.0);
     for (int k = 0; k < local_cols; ++k) {
-        double val = local_b[k];
-        for (int r = 0; r < ROWS; ++r) local_y1[r] += local_A_T[idx(k, r, ROWS)] * val;
+        double val_b = local_b[k];
+        for (int r = 0; r < ROWS; ++r) local_y1[r] += local_A_T[idx(k, r, ROWS)] * val_b;
     }
     std::vector<double> y1(ROWS);
     MPI_Allreduce(local_y1.data(), y1.data(), ROWS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
-    // y2 = A1 * (b1 - 24c1)
+    // y2
     std::vector<double> local_y2(ROWS, 0.0);
     for (int k = 0; k < local_cols; ++k) {
-        double val = local_b1[k] - (24.0 * local_c1[k]);
-        for (int r = 0; r < ROWS; ++r) local_y2[r] += local_A1_T[idx(k, r, ROWS)] * val;
+        double val_vec = local_b1[k] - (24.0 * local_c1[k]);
+        for (int r = 0; r < ROWS; ++r) local_y2[r] += local_A1_T[idx(k, r, ROWS)] * val_vec;
     }
     std::vector<double> y2(ROWS);
     MPI_Allreduce(local_y2.data(), y2.data(), ROWS, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
-    // Y3 = A2 * (B2 + 24C2)
+    // Y3
     std::vector<double> local_Y3_T(local_cols * ROWS);
     for (int k = 0; k < local_cols; ++k) {
         for (int r = 0; r < ROWS; ++r) {
@@ -156,23 +201,22 @@ int main(int argc, char** argv) {
         }
     }
 
-    log_stage(world_rank, "Matrix Y3 gathering (Gatherv)");
+    // === STAGE 6: GATHER ===
+    log_stage(world_rank, "Stage 6: Gather");
     std::vector<double> Y3_T;
     if (world_rank == 0) Y3_T.resize(ROWS * COLS);
     MPI_Gatherv(local_Y3_T.data(), local_cols * ROWS, MPI_DOUBLE, Y3_T.data(), sc_counts.data(), sc_displs.data(), MPI_DOUBLE, 0, MPI_COMM_WORLD);
 
-    log_stage(world_rank, "Final calculation (Rank 0)");
+    // === STAGE 7: FINAL FORMULA ===
+    log_stage(world_rank, "Stage 7: Final Formula");
 
     if (world_rank == 0) {
         std::vector<double> Y3 = transpose(Y3_T, COLS, ROWS);
-
-        std::vector<double> RightPart(ROWS, 0.0);
         
+        std::vector<double> RightPart(ROWS, 0.0);
         for(int i=0; i<ROWS; ++i) {
             double dot = 0.0;
-            for(int j=0; j<COLS; ++j) {
-                dot += Y3[idx(i, j, COLS)] * y1[j];
-            }
+            for(int j=0; j<COLS; ++j) dot += Y3[idx(i, j, COLS)] * y1[j];
             RightPart[i] = dot + y2[i];
         }
 
@@ -182,24 +226,22 @@ int main(int argc, char** argv) {
         std::vector<double> LeftPart(COLS, 0.0);
         for(int j=0; j<COLS; ++j) {
             double dot = 0.0;
-            for(int i=0; i<ROWS; ++i) {
-                dot += y2[i] * Y3_sq[idx(i, j, COLS)];
-            }
+            for(int i=0; i<ROWS; ++i) dot += y2[i] * Y3_sq[idx(i, j, COLS)];
             LeftPart[j] = dot + y1[j];
         }
 
         double final_x = 0.0;
         int min_dim = std::min(ROWS, COLS);
-        for(int i=0; i<min_dim; ++i) {
-            final_x += LeftPart[i] * RightPart[i];
-        }
+        for(int i=0; i<min_dim; ++i) final_x += LeftPart[i] * RightPart[i];
 
         double end_time = MPI_Wtime();
-        
-        std::cout << "\n========== RESULT ==========" << std::endl;
+
+        std::cout << "\n============================================" << std::endl;
+        std::cout << " RESULTS" << std::endl;
+        std::cout << "============================================" << std::endl;
         std::cout << " Time: " << (end_time - start_time) * 1000.0 << " ms" << std::endl;
-        std::cout << " Final X: " << std::scientific << final_x << std::endl;
-        std::cout << "===============================" << std::endl;
+        std::cout << " Final Result (X): " << std::scientific << final_x << std::endl;
+        std::cout << "============================================" << std::endl;
     }
 
     MPI_Finalize();
