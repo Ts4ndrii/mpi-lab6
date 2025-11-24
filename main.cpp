@@ -48,7 +48,6 @@ int main(int argc, char** argv) {
 
     if (world_rank == 0) {
         std::cout << "============================================" << std::endl;
-        std::cout << " STARTING LAB WORK #6 (VARIANT 24)" << std::endl;
         std::cout << " Dimensions: " << ROWS << " rows x " << COLS << " cols" << std::endl;
         std::cout << " Process count: " << world_size << std::endl;
         std::cout << "============================================" << std::endl;
@@ -73,7 +72,7 @@ int main(int argc, char** argv) {
     // === STAGE 0: STATISTICS (MEMORY & OPS) ===
     MPI_Barrier(MPI_COMM_WORLD);
     if (world_rank == 0) {
-        std::cout << "\n--- LOAD STATISTICS (for report) ---" << std::endl;
+        std::cout << "\n--- LOAD STATISTICS ---" << std::endl;
         std::cout << " Rank | Cols | Memory (KB) | Ops (FLOPs)" << std::endl;
         std::cout << "-----------------------------------------" << std::endl;
     }
